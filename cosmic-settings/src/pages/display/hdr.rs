@@ -60,12 +60,13 @@ pub fn read_conf() -> HdrConf {
 async fn write_conf_and_apply(c: HdrConf) -> Result<(), String> {
     let status = tokio::process::Command::new("pkexec")
         .args([BIN, "--save",
-               "--sdr-nits",   &c.sdr_nits.to_string(),
-               "--peak-nits",  &c.peak_nits.to_string(),
-               "--gamut",      &c.gamut.to_string(),
-               "--bpc",        &c.max_bpc.to_string(),
-               "--gamut-mode", &c.gamut_mode,
-               "--saturation", &c.saturation.to_string()])
+               "--sdr-nits",     &c.sdr_nits.to_string(),
+               "--peak-nits",    &c.peak_nits.to_string(),
+               "--gamut",        &c.gamut.to_string(),
+               "--bpc",          &c.max_bpc.to_string(),
+               "--gamut-mode",   &c.gamut_mode,
+               "--saturation",   &c.saturation.to_string(),
+               "--oled-dim-min", &c.oled_dim_min.to_string()])
         .status().await.map_err(|e| e.to_string())?;
     if status.success() { Ok(()) } else { Err(format!("kms-hdr exited {status}")) }
 }
@@ -106,15 +107,16 @@ fn read_nvidia_conf() -> NvidiaConf {
     if let Ok(s) = std::fs::read_to_string(GAME_CONF) {
         for line in s.lines() {
             if let Some((k, v)) = line.split_once('=') {
+                let v = v.trim();
                 match k.trim() {
-                    "SMOOTH_MOTION" => { c.smooth_motion = v.trim() != "0"; }
-                    "REFLEX"        => { c.reflex        = v.trim() != "0"; }
-                    "VIBRANCE"      => { if let Ok(n) = v.trim().parse() { c.vibrance  = n; } }
-                    "UPSCALE"       => { c.upscale = v.trim().to_owned(); }
-                    "DLDSR"         => { c.dldsr   = v.trim() != "0"; }
-                    "GS_WIDTH"      => { if let Ok(n) = v.trim().parse() { c.gs_width  = n; } }
-                    "GS_HEIGHT"     => { if let Ok(n) = v.trim().parse() { c.gs_height = n; } }
-                    "GS_FPS"        => { if let Ok(n) = v.trim().parse() { c.gs_fps    = n; } }
+                    "SMOOTH_MOTION" => { c.smooth_motion = v != "0"; }
+                    "REFLEX"        => { c.reflex        = v != "0"; }
+                    "VIBRANCE"      => { if let Ok(n) = v.parse() { c.vibrance  = n; } }
+                    "UPSCALE"       => { c.upscale = v.to_owned(); }
+                    "DLDSR"         => { c.dldsr   = v == "1"; }
+                    "GS_WIDTH"      => { if let Ok(n) = v.parse() { c.gs_width  = n; } }
+                    "GS_HEIGHT"     => { if let Ok(n) = v.parse() { c.gs_height = n; } }
+                    "GS_FPS"        => { if let Ok(n) = v.parse() { c.gs_fps    = n; } }
                     _ => {}
                 }
             }
@@ -124,13 +126,21 @@ fn read_nvidia_conf() -> NvidiaConf {
 }
 
 async fn write_nvidia_conf(c: NvidiaConf) -> Result<(), String> {
-    let content = format!(
-        "SMOOTH_MOTION={}\nREFLEX={}\nVIBRANCE={}\nUPSCALE={}\nDLDSR={}\nGS_WIDTH={}\nGS_HEIGHT={}\nGS_FPS={}\n",
-        c.smooth_motion as u8, c.reflex as u8, c.vibrance,
-        c.upscale, c.dldsr as u8, c.gs_width, c.gs_height, c.gs_fps,
-    );
-    tokio::fs::write(GAME_CONF, content).await
-        .map_err(|e| format!("write {GAME_CONF}: {e}"))
+    // Use pkexec kms-hdr --save-game (polkit allow_active = yes, no password prompt)
+    let status = tokio::process::Command::new("pkexec")
+        .args([
+            BIN, "--save-game",
+            &format!("SMOOTH_MOTION={}", c.smooth_motion as u8),
+            &format!("REFLEX={}", c.reflex as u8),
+            &format!("VIBRANCE={}", c.vibrance),
+            &format!("UPSCALE={}", c.upscale),
+            &format!("DLDSR={}", c.dldsr as u8),
+            &format!("GS_WIDTH={}", c.gs_width),
+            &format!("GS_HEIGHT={}", c.gs_height),
+            &format!("GS_FPS={}", c.gs_fps),
+        ])
+        .status().await.map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("kms-hdr --save-game exited {status}")) }
 }
 
 // ── GPU detection ─────────────────────────────────────────────────────────────
