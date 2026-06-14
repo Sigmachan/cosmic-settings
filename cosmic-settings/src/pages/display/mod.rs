@@ -110,8 +110,8 @@ pub enum Message {
         randr: Arc<Result<List, cosmic_randr_shell::Error>>,
     },
     Surface(surface::Action),
-    /// HDR display settings messages.
-    Hdr(hdr::Message),
+    /// Navigate to the HDR sub-page.
+    OpenHdr,
 }
 
 impl From<Message> for app::Message {
@@ -156,7 +156,8 @@ pub struct Page {
     dialog_countdown: usize,
     show_display_options: bool,
     adjusted_scale: u32,
-    pub hdr: hdr::Page,
+    /// Entity ID of the HDR sub-page for navigation.
+    pub hdr_id: page::Entity,
 }
 
 impl Default for Page {
@@ -179,7 +180,7 @@ impl Default for Page {
             dialog_countdown: 0,
             show_display_options: true,
             adjusted_scale: 0,
-            hdr: hdr::Page::default(),
+            hdr_id: page::Entity::default(),
         }
     }
 }
@@ -209,7 +210,16 @@ struct ViewCache {
     scale_selected: Option<usize>,
 }
 
-impl page::AutoBind<crate::pages::Message> for Page {}
+impl page::AutoBind<crate::pages::Message> for Page {
+    fn sub_pages(
+        mut page: page::Insert<crate::pages::Message>,
+    ) -> page::Insert<crate::pages::Message> {
+        let id = page.sub_page_with_id::<hdr::Page>();
+        let model = page.model.page_mut::<Page>().unwrap();
+        model.hdr_id = id;
+        page
+    }
+}
 
 impl page::Page<crate::pages::Message> for Page {
     fn content(
@@ -231,8 +241,8 @@ impl page::Page<crate::pages::Message> for Page {
             sections.insert(display_arrangement()),
             // Display configuration
             sections.insert(display_configuration()),
-            // HDR & Wide Colour
-            sections.insert(hdr::section()),
+            // HDR & Wide Colour navigation link
+            sections.insert(hdr_navigation()),
         ])
     }
 
@@ -255,7 +265,6 @@ impl page::Page<crate::pages::Message> for Page {
 
         let mut tasks = Vec::with_capacity(4);
         tasks.push(cosmic::task::future(on_enter()));
-        tasks.push(self.hdr.on_enter());
 
         if let Some((canceller, handle)) = self.randr_handle.take() {
             _ = canceller.send(());
@@ -668,8 +677,10 @@ impl Page {
                 return cosmic::task::message(crate::app::Message::Surface(a));
             }
 
-            Message::Hdr(msg) => {
-                return self.hdr.update(msg);
+            Message::OpenHdr => {
+                return cosmic::task::message(crate::app::Message::PageMessage(
+                    crate::pages::Message::Page(self.hdr_id),
+                ));
             }
         }
 
@@ -1465,6 +1476,19 @@ fn cache_rates(cached_rates: &mut Vec<String>, rates: &[u32]) {
             }
         }
     }
+}
+
+/// Navigation entry in the Display page that opens the HDR sub-page.
+pub fn hdr_navigation() -> Section<crate::pages::Message> {
+    Section::default()
+        .view::<Page>(|_binder, page, _section| {
+            widget::settings::section()
+                .add(crate::widget::go_next_item(
+                    "HDR & Wide Colour",
+                    crate::pages::Message::Page(page.hdr_id),
+                ))
+                .into()
+        })
 }
 
 pub async fn on_enter() -> crate::pages::Message {

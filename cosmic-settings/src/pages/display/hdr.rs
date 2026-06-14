@@ -1,12 +1,12 @@
 // Copyright 2024 Kira Keller <senedato@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! HDR display settings — integrated as a Section of the Display page.
+//! HDR display settings — sub-page of the Display page.
 
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{self, column, list_column, row, settings, text, toggler};
 use cosmic::{Apply, Element, Task};
-use cosmic_settings_page::Section;
+use cosmic_settings_page::{self as page, Section, section};
 
 const BIN: &str = "/usr/local/bin/kms-hdr";
 const HDR_CAL: &str = "/usr/local/lib/kms-hdr/hdr-cal.py";
@@ -25,6 +25,7 @@ pub struct HdrConf {
     pub midtone_gamma: u32,
     pub oled_preset:   bool,
     pub oled_dim_min:  u32,
+    pub force_oled:    bool,
 }
 
 impl Default for HdrConf {
@@ -33,6 +34,7 @@ impl Default for HdrConf {
             sdr_nits: 203, peak_nits: 800, gamut: 100, max_bpc: 10,
             gamut_mode: "bt2020".into(), saturation: 100,
             midtone_gamma: 100, oled_preset: false, oled_dim_min: 0,
+            force_oled: false,
         }
     }
 }
@@ -51,6 +53,7 @@ pub fn read_conf() -> HdrConf {
                     "SATURATION"    => { if let Ok(n) = v.trim().parse() { c.saturation    = n; } }
                     "MIDTONE_GAMMA" => { if let Ok(n) = v.trim().parse() { c.midtone_gamma = n; } }
                     "OLED_DIM_MIN"  => { if let Ok(n) = v.trim().parse() { c.oled_dim_min  = n; } }
+                    "FORCE_OLED"    => { c.force_oled = v.trim() == "1"; }
                     _ => {}
                 }
             }
@@ -78,6 +81,7 @@ fn nits_to_pq_percent(nits: u32) -> f64 {
 }
 
 async fn write_conf_and_apply(c: HdrConf) -> Result<(), String> {
+    let force_oled_s = if c.force_oled { "1".to_string() } else { "0".to_string() };
     let args = [
         "--sdr-nits",      &*c.sdr_nits.to_string(),
         "--peak-nits",     &*c.peak_nits.to_string(),
@@ -87,6 +91,7 @@ async fn write_conf_and_apply(c: HdrConf) -> Result<(), String> {
         "--saturation",    &*c.saturation.to_string(),
         "--midtone-gamma", &*c.midtone_gamma.to_string(),
         "--oled-dim-min",  &*c.oled_dim_min.to_string(),
+        "--force-oled",    &*force_oled_s,
     ];
     if daemon_alive() {
         // Fast path: write conf then signal daemon — no VT switch
@@ -462,6 +467,7 @@ pub enum Message {
     CalibrateHdr,
     CloseCalPat,
     // OLED Care
+    ForceOled(bool),
     OledPreset(bool),
     OledDimTimeout(u32),
     OledDimApplied(Result<(), String>),
@@ -477,10 +483,24 @@ pub enum Message {
     NvApplied(Result<(), String>),
 }
 
+// ── From impls ────────────────────────────────────────────────────────────────
+
+impl From<Message> for crate::pages::Message {
+    fn from(m: Message) -> Self {
+        crate::pages::Message::DisplayHdr(m)
+    }
+}
+
+impl From<Message> for crate::Message {
+    fn from(m: Message) -> Self {
+        crate::Message::PageMessage(m.into())
+    }
+}
+
 // ── Page state ────────────────────────────────────────────────────────────────
 
-#[derive(Default)]
 pub struct Page {
+    entity:              page::Entity,
     pub conf:            HdrConf,
     pub nvidia_conf:     NvidiaConf,
     pub hdr_enabled:     bool,
@@ -492,18 +512,24 @@ pub struct Page {
     pub cal_child:       Option<std::process::Child>,
 }
 
-impl Page {
-    pub fn on_enter(&self) -> Task<crate::pages::Message> {
-        cosmic::task::future(async move {
-            let (enabled, display, gpu) = tokio::task::spawn_blocking(|| {
-                (service_active(), parse_edid_blocking(), gpu_vendor())
-            }).await.unwrap_or((false, None, "unknown"));
-            crate::pages::Message::Displays(
-                super::Message::Hdr(Message::Loaded { enabled, display, gpu })
-            )
-        })
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            entity:          page::Entity::default(),
+            conf:            HdrConf::default(),
+            nvidia_conf:     NvidiaConf::default(),
+            hdr_enabled:     false,
+            display:         None,
+            display_is_oled: false,
+            gpu_vendor:      "unknown",
+            is_nvidia:       false,
+            status:          None,
+            cal_child:       None,
+        }
     }
+}
 
+impl Page {
     pub fn update(&mut self, message: Message) -> Task<crate::app::Message> {
         match message {
             Message::Loaded { enabled, display, gpu } => {
@@ -512,7 +538,8 @@ impl Page {
                 self.hdr_enabled = enabled;
                 self.gpu_vendor  = gpu;
                 self.is_nvidia   = gpu == "nvidia";
-                if let Some(ref d) = display { self.display_is_oled = d.is_oled; }
+                let edid_oled = display.as_ref().map(|d| d.is_oled).unwrap_or(false);
+                self.display_is_oled = edid_oled || self.conf.force_oled;
                 self.display     = display;
             }
 
@@ -522,7 +549,7 @@ impl Page {
                 let c = self.conf.clone();
                 return cosmic::task::future(async move {
                     let result = if on { write_conf_and_apply(c).await } else { do_reset().await };
-                    crate::app::Message::from(super::Message::Hdr(Message::Applied(result)))
+                    crate::app::Message::from(Message::Applied(result))
                 });
             }
 
@@ -543,7 +570,7 @@ impl Page {
                 let c = self.conf.clone();
                 return cosmic::task::future(async move {
                     let result = write_conf_and_apply(c).await;
-                    crate::app::Message::from(super::Message::Hdr(Message::Applied(result)))
+                    crate::app::Message::from(Message::Applied(result))
                 });
             }
             Message::Reset => {
@@ -551,7 +578,7 @@ impl Page {
                 self.status = Some("Resetting…".into());
                 return cosmic::task::future(async move {
                     let result = do_reset().await;
-                    crate::app::Message::from(super::Message::Hdr(Message::Applied(result)))
+                    crate::app::Message::from(Message::Applied(result))
                 });
             }
             Message::Applied(Ok(())) => { self.status = Some("Applied ✓".into()); }
@@ -585,6 +612,15 @@ impl Page {
             }
 
             // OLED Care
+            Message::ForceOled(on) => {
+                self.conf.force_oled = on;
+                self.display_is_oled = on || self.display.as_ref().map(|d| d.is_oled).unwrap_or(false);
+                let c = self.conf.clone();
+                return cosmic::task::future(async move {
+                    let result = write_conf_and_apply(c).await;
+                    crate::app::Message::from(Message::Applied(result))
+                });
+            }
             Message::OledPreset(on) => {
                 self.conf.oled_preset = on;
                 if on {
@@ -601,7 +637,7 @@ impl Page {
                                    else { format!("Setting auto-dim to {minutes} min…") });
                 return cosmic::task::future(async move {
                     let result = setup_oled_dim(minutes).await;
-                    crate::app::Message::from(super::Message::Hdr(Message::OledDimApplied(result)))
+                    crate::app::Message::from(Message::OledDimApplied(result))
                 });
             }
             Message::OledDimApplied(Ok(())) => {
@@ -626,7 +662,7 @@ impl Page {
                 let c = self.nvidia_conf.clone();
                 return cosmic::task::future(async move {
                     let result = write_nvidia_conf(c).await;
-                    crate::app::Message::from(super::Message::Hdr(Message::NvApplied(result)))
+                    crate::app::Message::from(Message::NvApplied(result))
                 });
             }
             Message::NvApplied(Ok(())) => { self.status = Some("NVIDIA config saved ✓".into()); }
@@ -697,17 +733,23 @@ impl Page {
             );
         }
 
-        // ── OLED Care (only when OLED detected) ───────────────────────────────
-        if self.display_is_oled {
-            let dim_label = if self.conf.oled_dim_min == 0 {
-                "Off".to_string()
-            } else {
-                format!("{} min", self.conf.oled_dim_min)
-            };
-
+        // ── OLED Care ─────────────────────────────────────────────────────────
+        {
             col = col.push(text::heading("OLED Care"));
-            col = col.push(
-                list_column()
+            let mut oled_col = list_column()
+                .add(settings::item::builder("OLED Panel Override")
+                    .description("Force OLED Care features on (use if EDID doesn't report OLED)")
+                    .control(toggler(self.conf.force_oled)
+                        .on_toggle(|v| msg(Message::ForceOled(v)))));
+
+            if self.display_is_oled {
+                let dim_label = if self.conf.oled_dim_min == 0 {
+                    "Off".to_string()
+                } else {
+                    format!("{} min", self.conf.oled_dim_min)
+                };
+
+                oled_col = oled_col
                     .add(settings::item::builder("Longevity Preset")
                         .description("SDR 150 nit / peak 600 nit — reduces panel stress in daily use")
                         .control(toggler(self.conf.oled_preset)
@@ -724,8 +766,10 @@ impl Page {
                         ))
                     .add(settings::item::builder("Pixel shift")
                         .description("Configure in COSMIC Display compositor settings")
-                        .control(widget::Space::new().width(Length::Shrink))),
-            );
+                        .control(widget::Space::new().width(Length::Shrink)));
+            }
+
+            col = col.push(oled_col);
         }
 
         // ── HDR toggle ────────────────────────────────────────────────────────
@@ -963,20 +1007,44 @@ impl Page {
 }
 
 fn msg(m: Message) -> crate::pages::Message {
-    crate::pages::Message::Displays(super::Message::Hdr(m))
+    crate::pages::Message::DisplayHdr(m)
 }
 
-// ── Section factory ───────────────────────────────────────────────────────────
+// ── page::Page impl ───────────────────────────────────────────────────────────
 
-pub fn section() -> Section<crate::pages::Message> {
+impl page::AutoBind<crate::pages::Message> for Page {}
+
+impl page::Page<crate::pages::Message> for Page {
+    fn info(&self) -> page::Info {
+        page::Info::new("display-hdr", "video-display-symbolic")
+            .title("HDR & Wide Colour")
+            .description("Tone mapping, colour gamut, calibration and gaming settings")
+    }
+
+    fn set_id(&mut self, entity: page::Entity) {
+        self.entity = entity;
+    }
+
+    fn content(
+        &self,
+        sections: &mut slotmap::SlotMap<section::Entity, Section<crate::pages::Message>>,
+    ) -> Option<page::Content> {
+        Some(vec![sections.insert(hdr_view_section())])
+    }
+
+    fn on_enter(&mut self) -> Task<crate::pages::Message> {
+        cosmic::task::future(async move {
+            let (enabled, display, gpu) = tokio::task::spawn_blocking(|| {
+                (service_active(), parse_edid_blocking(), gpu_vendor())
+            }).await.unwrap_or((false, None, "unknown"));
+            crate::pages::Message::DisplayHdr(Message::Loaded { enabled, display, gpu })
+        })
+    }
+}
+
+fn hdr_view_section() -> Section<crate::pages::Message> {
     Section::default()
         .title("HDR")
         .search_ignore()
-        .view::<super::Page>(|_binder, page, _section| {
-            settings::view_column(vec![
-                text::heading("HDR & Wide Colour").into(),
-                page.hdr.view(),
-            ])
-            .into()
-        })
+        .view::<Page>(|_binder, page, _section| page.view())
 }
