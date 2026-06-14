@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 pub mod arrangement;
+pub mod hdr;
 // pub mod night_light;
 
 use crate::{app, pages};
@@ -109,6 +110,8 @@ pub enum Message {
         randr: Arc<Result<List, cosmic_randr_shell::Error>>,
     },
     Surface(surface::Action),
+    /// HDR display settings messages.
+    Hdr(hdr::Message),
 }
 
 impl From<Message> for app::Message {
@@ -153,6 +156,7 @@ pub struct Page {
     dialog_countdown: usize,
     show_display_options: bool,
     adjusted_scale: u32,
+    pub hdr: hdr::Page,
 }
 
 impl Default for Page {
@@ -175,6 +179,7 @@ impl Default for Page {
             dialog_countdown: 0,
             show_display_options: true,
             adjusted_scale: 0,
+            hdr: hdr::Page::default(),
         }
     }
 }
@@ -226,6 +231,8 @@ impl page::Page<crate::pages::Message> for Page {
             sections.insert(display_arrangement()),
             // Display configuration
             sections.insert(display_configuration()),
+            // HDR & Wide Colour
+            sections.insert(hdr::section()),
         ])
     }
 
@@ -246,8 +253,9 @@ impl page::Page<crate::pages::Message> for Page {
             fl!("orientation", "rotate-270"),
         ];
 
-        let mut tasks = Vec::with_capacity(3);
+        let mut tasks = Vec::with_capacity(4);
         tasks.push(cosmic::task::future(on_enter()));
+        tasks.push(self.hdr.on_enter());
 
         if let Some((canceller, handle)) = self.randr_handle.take() {
             _ = canceller.send(());
@@ -658,6 +666,10 @@ impl Page {
 
             Message::Surface(a) => {
                 return cosmic::task::message(crate::app::Message::Surface(a));
+            }
+
+            Message::Hdr(msg) => {
+                return self.hdr.update(msg);
             }
         }
 
