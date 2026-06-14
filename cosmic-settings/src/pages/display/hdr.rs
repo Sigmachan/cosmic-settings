@@ -16,14 +16,15 @@ const GAME_CONF: &str = "/etc/hdr-game.conf";
 
 #[derive(Debug, Clone)]
 pub struct HdrConf {
-    pub sdr_nits:     u32,
-    pub peak_nits:    u32,
-    pub gamut:        u32,
-    pub max_bpc:      u32,
-    pub gamut_mode:   String,
-    pub saturation:   u32,
-    pub oled_preset:  bool,
-    pub oled_dim_min: u32,
+    pub sdr_nits:      u32,
+    pub peak_nits:     u32,
+    pub gamut:         u32,
+    pub max_bpc:       u32,
+    pub gamut_mode:    String,
+    pub saturation:    u32,
+    pub midtone_gamma: u32,
+    pub oled_preset:   bool,
+    pub oled_dim_min:  u32,
 }
 
 impl Default for HdrConf {
@@ -31,7 +32,7 @@ impl Default for HdrConf {
         Self {
             sdr_nits: 203, peak_nits: 800, gamut: 100, max_bpc: 10,
             gamut_mode: "bt2020".into(), saturation: 100,
-            oled_preset: false, oled_dim_min: 0,
+            midtone_gamma: 100, oled_preset: false, oled_dim_min: 0,
         }
     }
 }
@@ -47,8 +48,9 @@ pub fn read_conf() -> HdrConf {
                     "GAMUT"        => { if let Ok(n) = v.trim().parse() { c.gamut        = n; } }
                     "MAX_BPC"      => { if let Ok(n) = v.trim().parse() { c.max_bpc      = n; } }
                     "GAMUT_MODE"   => { c.gamut_mode = v.trim().to_owned(); }
-                    "SATURATION"   => { if let Ok(n) = v.trim().parse() { c.saturation   = n; } }
-                    "OLED_DIM_MIN" => { if let Ok(n) = v.trim().parse() { c.oled_dim_min = n; } }
+                    "SATURATION"    => { if let Ok(n) = v.trim().parse() { c.saturation    = n; } }
+                    "MIDTONE_GAMMA" => { if let Ok(n) = v.trim().parse() { c.midtone_gamma = n; } }
+                    "OLED_DIM_MIN"  => { if let Ok(n) = v.trim().parse() { c.oled_dim_min  = n; } }
                     _ => {}
                 }
             }
@@ -57,18 +59,52 @@ pub fn read_conf() -> HdrConf {
     c
 }
 
+fn daemon_alive() -> bool {
+    std::fs::read_to_string("/run/kms-hdr.pid").ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+        .unwrap_or(false)
+}
+
+fn nits_to_pq_percent(nits: u32) -> f64 {
+    const M1: f64 = 0.1593017578125;
+    const M2: f64 = 78.84375;
+    const C1: f64 = 0.8359375;
+    const C2: f64 = 18.8515625;
+    const C3: f64 = 18.6875;
+    let y = (nits as f64 / 10_000.0).clamp(0.0, 1.0);
+    let ym = y.powf(M1);
+    ((C1 + C2 * ym) / (1.0 + C3 * ym)).max(0.0).powf(M2) * 100.0
+}
+
 async fn write_conf_and_apply(c: HdrConf) -> Result<(), String> {
-    let status = tokio::process::Command::new("pkexec")
-        .args([BIN, "--save",
-               "--sdr-nits",     &c.sdr_nits.to_string(),
-               "--peak-nits",    &c.peak_nits.to_string(),
-               "--gamut",        &c.gamut.to_string(),
-               "--bpc",          &c.max_bpc.to_string(),
-               "--gamut-mode",   &c.gamut_mode,
-               "--saturation",   &c.saturation.to_string(),
-               "--oled-dim-min", &c.oled_dim_min.to_string()])
+    let args = [
+        "--sdr-nits",      &*c.sdr_nits.to_string(),
+        "--peak-nits",     &*c.peak_nits.to_string(),
+        "--gamut",         &*c.gamut.to_string(),
+        "--bpc",           &*c.max_bpc.to_string(),
+        "--gamut-mode",    &*c.gamut_mode,
+        "--saturation",    &*c.saturation.to_string(),
+        "--midtone-gamma", &*c.midtone_gamma.to_string(),
+        "--oled-dim-min",  &*c.oled_dim_min.to_string(),
+    ];
+    if daemon_alive() {
+        // Fast path: write conf then signal daemon — no VT switch
+        let mut save_args = vec![BIN, "--save-only"];
+        save_args.extend_from_slice(&args);
+        let s = tokio::process::Command::new("pkexec").args(&save_args)
+            .status().await.map_err(|e| e.to_string())?;
+        if !s.success() { return Err(format!("kms-hdr --save-only exited {s}")); }
+        let r = tokio::process::Command::new("pkexec").args([BIN, "--reload"])
+            .status().await.map_err(|e| e.to_string())?;
+        if r.success() { return Ok(()); }
+        // daemon died between check and reload — fall through to direct apply
+    }
+    let mut full_args = vec![BIN, "--save"];
+    full_args.extend_from_slice(&args);
+    let s = tokio::process::Command::new("pkexec").args(&full_args)
         .status().await.map_err(|e| e.to_string())?;
-    if status.success() { Ok(()) } else { Err(format!("kms-hdr exited {status}")) }
+    if s.success() { Ok(()) } else { Err(format!("kms-hdr exited {s}")) }
 }
 
 async fn do_reset() -> Result<(), String> {
@@ -417,6 +453,7 @@ pub enum Message {
     Gamut(u32),
     GamutMode(usize),
     Saturation(u32),
+    MidtoneGamma(u32),
     BitDepth(usize),
     Apply,
     Reset,
@@ -492,7 +529,8 @@ impl Page {
             Message::SdrNits(v)   => { self.conf.sdr_nits  = v; }
             Message::PeakNits(v)  => { self.conf.peak_nits = v; }
             Message::Gamut(v)     => { self.conf.gamut      = v; }
-            Message::Saturation(v) => { self.conf.saturation = v; }
+            Message::Saturation(v)   => { self.conf.saturation    = v; }
+            Message::MidtoneGamma(v) => { self.conf.midtone_gamma = v; }
             Message::GamutMode(i) => {
                 self.conf.gamut_mode = ["bt2020", "dci-p3", "srgb"][i.min(2)].into();
             }
@@ -698,24 +736,26 @@ impl Page {
         ));
 
         // ── Brightness ────────────────────────────────────────────────────────
+        let sdr_pq = nits_to_pq_percent(self.conf.sdr_nits);
         let sdr_row = settings::item::builder("SDR White Point")
             .description("Brightness of desktop and SDR content in HDR mode (ITU-R BT.2408: 203 nits)")
             .control(
                 row::with_capacity(2).spacing(sp.space_s).align_y(Alignment::Center)
                     .push(widget::slider(80..=400u32, self.conf.sdr_nits, |v| msg(Message::SdrNits(v)))
                         .width(Length::Fill))
-                    .push(text::body(format!("{} nits", self.conf.sdr_nits))
-                        .apply(widget::container).width(Length::Fixed(76.0))),
+                    .push(text::body(format!("{} nits  ({:.1}% PQ)", self.conf.sdr_nits, sdr_pq))
+                        .apply(widget::container).width(Length::Fixed(140.0))),
             );
 
+        let peak_pq = nits_to_pq_percent(self.conf.peak_nits);
         let peak_row = settings::item::builder("Display Peak Luminance")
             .description("Your display's maximum HDR nits — used for HDR10 metadata signaling")
             .control(
                 row::with_capacity(2).spacing(sp.space_s).align_y(Alignment::Center)
                     .push(widget::slider(400..=1600u32, self.conf.peak_nits, |v| msg(Message::PeakNits(v)))
                         .step(10u32).width(Length::Fill))
-                    .push(text::body(format!("{} nits", self.conf.peak_nits))
-                        .apply(widget::container).width(Length::Fixed(76.0))),
+                    .push(text::body(format!("{} nits  ({:.1}% PQ)", self.conf.peak_nits, peak_pq))
+                        .apply(widget::container).width(Length::Fixed(140.0))),
             );
 
         col = col.push(list_column().add(sdr_row).add(peak_row));
@@ -768,6 +808,26 @@ impl Page {
                         .apply(widget::container).width(Length::Fixed(52.0))),
             );
         col = col.push(list_column().add(sat_row));
+
+        // ── Tone mapping ──────────────────────────────────────────────────────
+        let mg_desc = match self.conf.midtone_gamma {
+            v if v > 110 => format!("{}%  — HDR punch (darkened midtones, higher contrast)", v),
+            v if v < 90  => format!("{}%  — lifted midtones (lower contrast)", v),
+            v            => format!("{}%  — neutral", v),
+        };
+        col = col.push(text::heading("Tone Mapping"));
+        col = col.push(list_column().add(
+            settings::item::builder("Midtone Gamma")
+                .description(mg_desc)
+                .control(
+                    row::with_capacity(2).spacing(sp.space_s).align_y(Alignment::Center)
+                        .push(widget::slider(30..=250u32, self.conf.midtone_gamma,
+                                             |v| msg(Message::MidtoneGamma(v)))
+                            .step(5u32).width(Length::Fill))
+                        .push(text::body(format!("{}%", self.conf.midtone_gamma))
+                            .apply(widget::container).width(Length::Fixed(52.0))),
+                ),
+        ));
 
         // ── Output format ─────────────────────────────────────────────────────
         let bpc_opts = vec![
