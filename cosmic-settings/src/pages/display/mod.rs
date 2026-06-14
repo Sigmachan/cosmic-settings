@@ -1480,15 +1480,19 @@ fn cache_rates(cached_rates: &mut Vec<String>, rates: &[u32]) {
 
 /// Navigation entry in the Display page that opens the HDR sub-page.
 pub fn hdr_navigation() -> Section<crate::pages::Message> {
-    Section::default()
-        .view::<Page>(|_binder, page, _section| {
-            widget::settings::section()
-                .add(crate::widget::go_next_item(
-                    "HDR & Wide Colour",
-                    crate::pages::Message::Page(page.hdr_id),
-                ))
-                .into()
-        })
+    Section::default().view::<Page>(|_binder, page, _section| {
+        // Guard against dispatching a dangling `Page(null)` message before
+        // `sub_pages` has assigned a real entity id to the HDR sub-page.
+        if page.hdr_id.is_null() {
+            return widget::settings::section().into();
+        }
+        widget::settings::section()
+            .add(crate::widget::go_next_item(
+                "HDR & Wide Colour",
+                crate::pages::Message::Page(page.hdr_id),
+            ))
+            .into()
+    })
 }
 
 pub async fn on_enter() -> crate::pages::Message {
