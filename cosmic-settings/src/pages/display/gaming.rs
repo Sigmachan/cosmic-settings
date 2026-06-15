@@ -13,6 +13,49 @@ use cosmic::widget::{self, column, list_column, row, settings, text, toggler};
 use cosmic::{Apply, Element, Task};
 use cosmic_settings_page::{self as page, Section, section};
 
+/// Best-effort live control of a *running* wayscope/gamescope session via the
+/// `wayscope-dbus` daemon (DBus name `org.shadowblip.Gamescope`). When no
+/// daemon/session is present the call simply errors and is ignored — the conf
+/// file remains the source of truth for the next launch.
+mod wayscope_dbus {
+    #[zbus::proxy(
+        interface = "org.shadowblip.Gamescope.XWayland.Primary",
+        default_service = "org.shadowblip.Gamescope",
+        default_path = "/org/shadowblip/Gamescope/XWayland0"
+    )]
+    pub trait Primary {
+        fn set_hdr_enabled(&self, enable: bool) -> zbus::Result<()>;
+        fn set_vrr_enabled(&self, enable: bool) -> zbus::Result<()>;
+        fn set_fps_limit(&self, fps: u32) -> zbus::Result<()>;
+    }
+
+    /// A setting that can be applied to the live session immediately.
+    #[derive(Debug, Clone)]
+    pub enum Live {
+        Hdr(bool),
+        Vrr(bool),
+        Fps(u32),
+    }
+
+    pub async fn apply(change: Live) -> Result<(), String> {
+        let conn = zbus::Connection::session().await.map_err(|e| e.to_string())?;
+        let proxy = PrimaryProxy::new(&conn).await.map_err(|e| e.to_string())?;
+        match change {
+            Live::Hdr(v) => proxy.set_hdr_enabled(v).await,
+            Live::Vrr(v) => proxy.set_vrr_enabled(v).await,
+            Live::Fps(v) => proxy.set_fps_limit(v).await,
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Fire a best-effort live-apply at the running session (no-op if absent).
+fn live_task(change: wayscope_dbus::Live) -> Task<crate::app::Message> {
+    cosmic::task::future(async move {
+        crate::app::Message::from(Message::LiveApplied(wayscope_dbus::apply(change).await))
+    })
+}
+
 // ── config ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -226,6 +269,8 @@ pub enum Message {
     NvDldsr(bool),
     Save,
     Saved(Result<(), String>),
+    /// Result of a best-effort live apply to a running session.
+    LiveApplied(Result<(), String>),
 }
 
 impl From<Message> for crate::pages::Message {
@@ -306,9 +351,18 @@ impl Page {
                 self.conf.upscaler = UPSCALERS[i.min(UPSCALERS.len() - 1)].into();
             }
             Message::Sharpness(v) => self.conf.sharpness = v,
-            Message::FpsLimit(v) => self.conf.fps_limit = v,
-            Message::Hdr(v) => self.conf.hdr = v,
-            Message::AdaptiveSync(v) => self.conf.adaptive_sync = v,
+            Message::FpsLimit(v) => {
+                self.conf.fps_limit = v;
+                return live_task(wayscope_dbus::Live::Fps(v));
+            }
+            Message::Hdr(v) => {
+                self.conf.hdr = v;
+                return live_task(wayscope_dbus::Live::Hdr(v));
+            }
+            Message::AdaptiveSync(v) => {
+                self.conf.adaptive_sync = v;
+                return live_task(wayscope_dbus::Live::Vrr(v));
+            }
             Message::Mangoapp(v) => self.conf.mangoapp = v,
             Message::ForceGrabCursor(v) => self.conf.force_grab_cursor = v,
             Message::Steam(v) => self.conf.steam = v,
@@ -326,6 +380,10 @@ impl Page {
             }
             Message::Saved(Ok(())) => self.status = Some("Saved ✓".into()),
             Message::Saved(Err(e)) => self.status = Some(format!("Error: {e}")),
+            // Live apply is best-effort: success shows a subtle hint, absence of
+            // a running wayscope session errors silently (conf still persists).
+            Message::LiveApplied(Ok(())) => self.status = Some("Applied to running session ✓".into()),
+            Message::LiveApplied(Err(_)) => {}
         }
         Task::none()
     }
