@@ -30,6 +30,11 @@ pub struct GamingConf {
     pub force_grab_cursor: bool,
     pub steam: bool,
     pub prefer_discrete: bool,
+    // NVIDIA-only gaming features (applied as env by gamescope-launch)
+    pub nv_smooth_motion: bool,
+    pub nv_reflex: bool,
+    pub nv_vibrance: i32,
+    pub nv_dldsr: bool,
 }
 
 impl Default for GamingConf {
@@ -47,6 +52,10 @@ impl Default for GamingConf {
             force_grab_cursor: false,
             steam: false,
             prefer_discrete: true,
+            nv_smooth_motion: false,
+            nv_reflex: true,
+            nv_vibrance: 0,
+            nv_dldsr: false,
         }
     }
 }
@@ -87,6 +96,10 @@ fn read_conf() -> GamingConf {
             "FORCE_GRAB_CURSOR" => c.force_grab_cursor = v == "1",
             "STEAM" => c.steam = v == "1",
             "PREFER_DISCRETE" => c.prefer_discrete = v == "1",
+            "NV_SMOOTH_MOTION" => c.nv_smooth_motion = v == "1",
+            "NV_REFLEX" => c.nv_reflex = v == "1",
+            "NV_VIBRANCE" => c.nv_vibrance = v.parse().unwrap_or(c.nv_vibrance),
+            "NV_DLDSR" => c.nv_dldsr = v == "1",
             _ => {}
         }
     }
@@ -98,7 +111,8 @@ impl GamingConf {
         format!(
             "OUT_WIDTH={}\nOUT_HEIGHT={}\nRENDER_SCALE={}\nUPSCALER={}\nSHARPNESS={}\n\
              FPS_LIMIT={}\nHDR={}\nADAPTIVE_SYNC={}\nMANGOAPP={}\nFORCE_GRAB_CURSOR={}\n\
-             STEAM={}\nPREFER_DISCRETE={}\n",
+             STEAM={}\nPREFER_DISCRETE={}\n\
+             NV_SMOOTH_MOTION={}\nNV_REFLEX={}\nNV_VIBRANCE={}\nNV_DLDSR={}\n",
             self.out_width,
             self.out_height,
             self.render_scale,
@@ -111,6 +125,10 @@ impl GamingConf {
             self.force_grab_cursor as u8,
             self.steam as u8,
             self.prefer_discrete as u8,
+            self.nv_smooth_motion as u8,
+            self.nv_reflex as u8,
+            self.nv_vibrance,
+            self.nv_dldsr as u8,
         )
     }
 
@@ -202,6 +220,10 @@ pub enum Message {
     ForceGrabCursor(bool),
     Steam(bool),
     PreferDiscrete(bool),
+    NvSmoothMotion(bool),
+    NvReflex(bool),
+    NvVibrance(i32),
+    NvDldsr(bool),
     Save,
     Saved(Result<(), String>),
 }
@@ -291,6 +313,10 @@ impl Page {
             Message::ForceGrabCursor(v) => self.conf.force_grab_cursor = v,
             Message::Steam(v) => self.conf.steam = v,
             Message::PreferDiscrete(v) => self.conf.prefer_discrete = v,
+            Message::NvSmoothMotion(v) => self.conf.nv_smooth_motion = v,
+            Message::NvReflex(v) => self.conf.nv_reflex = v,
+            Message::NvVibrance(v) => self.conf.nv_vibrance = v,
+            Message::NvDldsr(v) => self.conf.nv_dldsr = v,
             Message::Save => {
                 self.status = Some("Saving…".into());
                 let c = self.conf.clone();
@@ -488,6 +514,55 @@ impl Page {
                         ),
                 ),
         );
+
+        // ── NVIDIA gaming (only on NVIDIA) ────────────────────────────────────
+        if self.gpu == "NVIDIA" {
+            col = col.push(text::heading("NVIDIA"));
+            let vibrance_row = settings::item::builder("Digital Vibrance")
+                .description("nvibrant — 0 = neutral, 1023 = maximum saturation")
+                .control(
+                    row::with_capacity(2)
+                        .spacing(sp.space_s)
+                        .align_y(Alignment::Center)
+                        .push(
+                            widget::slider(-1024..=1023i32, self.conf.nv_vibrance, |v| {
+                                msg(Message::NvVibrance(v))
+                            })
+                            .width(Length::Fill),
+                        )
+                        .push(
+                            text::body(format!("{}", self.conf.nv_vibrance))
+                                .apply(widget::container)
+                                .width(Length::Fixed(52.0)),
+                        ),
+                );
+            col = col.push(
+                list_column()
+                    .add(
+                        settings::item::builder("RTX Smooth Motion")
+                            .description("Driver frame generation (NVPRESENT_ENABLE_SMOOTH_MOTION, driver 575+)")
+                            .control(
+                                toggler(self.conf.nv_smooth_motion)
+                                    .on_toggle(|v| msg(Message::NvSmoothMotion(v))),
+                            ),
+                    )
+                    .add(
+                        settings::item::builder("NVIDIA Reflex (Low Latency)")
+                            .description("PROTON_ENABLE_NVAPI + DXVK_ENABLE_NVAPI — Proton/DXVK games")
+                            .control(
+                                toggler(self.conf.nv_reflex).on_toggle(|v| msg(Message::NvReflex(v))),
+                            ),
+                    )
+                    .add(
+                        settings::item::builder("DLDSR 2.25×")
+                            .description("Deep-learning dynamic super-resolution downscale")
+                            .control(
+                                toggler(self.conf.nv_dldsr).on_toggle(|v| msg(Message::NvDldsr(v))),
+                            ),
+                    )
+                    .add(vibrance_row),
+            );
+        }
 
         // ── command preview ───────────────────────────────────────────────────
         col = col.push(text::heading("Command Preview"));

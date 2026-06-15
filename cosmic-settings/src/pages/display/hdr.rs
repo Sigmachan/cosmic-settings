@@ -10,7 +10,6 @@ use cosmic_settings_page::{self as page, Section, section};
 
 const BIN: &str = "/usr/local/bin/kms-hdr";
 const HDR_CAL: &str = "/usr/local/lib/kms-hdr/hdr-cal.py";
-const GAME_CONF: &str = "/etc/hdr-game.conf";
 
 // ── HDR config ────────────────────────────────────────────────────────────────
 
@@ -194,109 +193,6 @@ async fn do_reset() -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("kms-hdr reset exited {status}"))
-    }
-}
-
-// ── NVIDIA gaming config ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct NvidiaConf {
-    pub smooth_motion: bool,
-    pub reflex: bool,
-    pub vibrance: i32,
-    pub upscale: String,
-    pub dldsr: bool,
-    pub gs_width: u32,
-    pub gs_height: u32,
-    pub gs_fps: u32,
-}
-
-impl Default for NvidiaConf {
-    fn default() -> Self {
-        Self {
-            smooth_motion: true,
-            reflex: true,
-            vibrance: 0,
-            upscale: "fsr".into(),
-            dldsr: false,
-            gs_width: 3840,
-            gs_height: 2160,
-            gs_fps: 120,
-        }
-    }
-}
-
-fn read_nvidia_conf() -> NvidiaConf {
-    let mut c = NvidiaConf::default();
-    if let Ok(s) = std::fs::read_to_string(GAME_CONF) {
-        for line in s.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                let v = v.trim();
-                match k.trim() {
-                    "SMOOTH_MOTION" => {
-                        c.smooth_motion = v != "0";
-                    }
-                    "REFLEX" => {
-                        c.reflex = v != "0";
-                    }
-                    "VIBRANCE" => {
-                        if let Ok(n) = v.parse() {
-                            c.vibrance = n;
-                        }
-                    }
-                    "UPSCALE" => {
-                        if UPSCALE_MODES.contains(&v) {
-                            c.upscale = v.to_owned();
-                        }
-                    }
-                    "DLDSR" => {
-                        c.dldsr = v == "1";
-                    }
-                    "GS_WIDTH" => {
-                        if let Ok(n) = v.parse() {
-                            c.gs_width = n;
-                        }
-                    }
-                    "GS_HEIGHT" => {
-                        if let Ok(n) = v.parse() {
-                            c.gs_height = n;
-                        }
-                    }
-                    "GS_FPS" => {
-                        if let Ok(n) = v.parse() {
-                            c.gs_fps = n;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    c
-}
-
-async fn write_nvidia_conf(c: NvidiaConf) -> Result<(), String> {
-    // Use pkexec kms-hdr --save-game (polkit allow_active = yes, no password prompt)
-    let status = tokio::process::Command::new("pkexec")
-        .args([
-            BIN,
-            "--save-game",
-            &format!("SMOOTH_MOTION={}", c.smooth_motion as u8),
-            &format!("REFLEX={}", c.reflex as u8),
-            &format!("VIBRANCE={}", c.vibrance),
-            &format!("UPSCALE={}", c.upscale),
-            &format!("DLDSR={}", c.dldsr as u8),
-            &format!("GS_WIDTH={}", c.gs_width),
-            &format!("GS_HEIGHT={}", c.gs_height),
-            &format!("GS_FPS={}", c.gs_fps),
-        ])
-        .status()
-        .await
-        .map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("kms-hdr --save-game exited {status}"))
     }
 }
 
@@ -618,22 +514,6 @@ impl CalibPattern {
     }
 }
 
-const GS_RESOLUTIONS: &[(u32, u32, &str)] = &[
-    (1920, 1080, "1920 × 1080  (1080p)"),
-    (2560, 1440, "2560 × 1440  (1440p)"),
-    (3840, 2160, "3840 × 2160  (4K UHD)"),
-    (5120, 2880, "5120 × 2880  (5K)"),
-    (7680, 4320, "7680 × 4320  (8K)"),
-];
-
-const UPSCALE_MODES: &[&str] = &["fsr", "nis", "integer", "nearest"];
-const UPSCALE_LABELS: &[&str] = &[
-    "FSR 1.0 (AMD FidelityFX)",
-    "NIS (NVIDIA ImageScaling)",
-    "Integer scale",
-    "Nearest-neighbour",
-];
-
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -643,7 +523,6 @@ pub enum Message {
         display: Option<DisplayInfo>,
         gpu: &'static str,
         conf: HdrConf,
-        nvidia_conf: NvidiaConf,
     },
     OledDimScrub(u32),
     HdrToggle(bool),
@@ -665,16 +544,6 @@ pub enum Message {
     OledPreset(bool),
     OledDimTimeout(u32),
     OledDimApplied(Result<(), String>),
-    // NVIDIA Gaming
-    NvSmoothMotion(bool),
-    NvReflex(bool),
-    NvVibrance(i32),
-    NvUpscale(usize),
-    NvDldsr(bool),
-    NvGsResolution(u32, u32),
-    NvGsFps(u32),
-    NvApply,
-    NvApplied(Result<(), String>),
 }
 
 // ── From impls ────────────────────────────────────────────────────────────────
@@ -696,7 +565,6 @@ impl From<Message> for crate::Message {
 pub struct Page {
     entity: page::Entity,
     pub conf: HdrConf,
-    pub nvidia_conf: NvidiaConf,
     pub hdr_enabled: bool,
     pub display: Option<DisplayInfo>,
     pub display_is_oled: bool,
@@ -711,7 +579,6 @@ impl Default for Page {
         Self {
             entity: page::Entity::default(),
             conf: HdrConf::default(),
-            nvidia_conf: NvidiaConf::default(),
             hdr_enabled: false,
             display: None,
             display_is_oled: false,
@@ -731,10 +598,8 @@ impl Page {
                 display,
                 gpu,
                 conf,
-                nvidia_conf,
             } => {
                 self.conf = conf;
-                self.nvidia_conf = nvidia_conf;
                 self.hdr_enabled = enabled;
                 self.gpu_vendor = gpu;
                 self.is_nvidia = gpu == "nvidia";
@@ -905,44 +770,6 @@ impl Page {
             }
             Message::OledDimApplied(Err(e)) => {
                 self.status = Some(format!("OLED dim error: {e}"));
-            }
-
-            // NVIDIA Gaming
-            Message::NvSmoothMotion(v) => {
-                self.nvidia_conf.smooth_motion = v;
-            }
-            Message::NvReflex(v) => {
-                self.nvidia_conf.reflex = v;
-            }
-            Message::NvVibrance(v) => {
-                self.nvidia_conf.vibrance = v;
-            }
-            Message::NvDldsr(v) => {
-                self.nvidia_conf.dldsr = v;
-            }
-            Message::NvGsResolution(w, h) => {
-                self.nvidia_conf.gs_width = w;
-                self.nvidia_conf.gs_height = h;
-            }
-            Message::NvGsFps(v) => {
-                self.nvidia_conf.gs_fps = v;
-            }
-            Message::NvUpscale(i) => {
-                self.nvidia_conf.upscale = UPSCALE_MODES[i.min(UPSCALE_MODES.len() - 1)].into();
-            }
-            Message::NvApply => {
-                self.status = Some("Saving NVIDIA gaming config…".into());
-                let c = self.nvidia_conf.clone();
-                return cosmic::task::future(async move {
-                    let result = write_nvidia_conf(c).await;
-                    crate::app::Message::from(Message::NvApplied(result))
-                });
-            }
-            Message::NvApplied(Ok(())) => {
-                self.status = Some("NVIDIA config saved ✓".into());
-            }
-            Message::NvApplied(Err(e)) => {
-                self.status = Some(format!("NVIDIA config error: {e}"));
             }
         }
         Task::none()
@@ -1279,92 +1106,15 @@ impl Page {
             ),
         );
 
-        // ── NVIDIA Gaming (only when NVIDIA GPU detected) ─────────────────────
+        // Gaming / Gamescope / NVIDIA features now live on the dedicated
+        // Settings → Displays → Gaming page (no longer duplicated here).
         if self.is_nvidia {
-            col = col.push(text::heading("NVIDIA Gaming  (Gamescope / hdr-game)"));
-
-            let res_opts: Vec<String> = GS_RESOLUTIONS
-                .iter()
-                .map(|&(_, _, label)| label.to_string())
-                .collect();
-            let res_sel = GS_RESOLUTIONS.iter().position(|&(w, h, _)| {
-                w == self.nvidia_conf.gs_width && h == self.nvidia_conf.gs_height
-            });
-
-            let upscale_opts: Vec<String> = UPSCALE_LABELS.iter().map(|s| s.to_string()).collect();
-            let upscale_sel = UPSCALE_MODES
-                .iter()
-                .position(|&m| m == self.nvidia_conf.upscale);
-
-            let fps_row = settings::item::builder("Frame Rate Cap")
-                .description("Gamescope --framerate-limit passed to hdr-game")
-                .control(
-                    row::with_capacity(2)
-                        .spacing(sp.space_s)
-                        .align_y(Alignment::Center)
-                        .push(
-                            widget::slider(30..=360u32, self.nvidia_conf.gs_fps, |v| {
-                                msg(Message::NvGsFps(v))
-                            })
-                            .step(5u32)
-                            .width(Length::Fill),
-                        )
-                        .push(
-                            text::body(format!("{} fps", self.nvidia_conf.gs_fps))
-                                .apply(widget::container)
-                                .width(Length::Fixed(64.0)),
-                        ),
-                );
-
-            let vibrance_row = settings::item::builder("Digital Vibrance")
-                .description("nvibrant ioctl — 0 = neutral, 1023 = maximum saturation")
-                .control(
-                    row::with_capacity(2)
-                        .spacing(sp.space_s)
-                        .align_y(Alignment::Center)
-                        .push(
-                            widget::slider(-1024..=1023i32, self.nvidia_conf.vibrance, |v| {
-                                msg(Message::NvVibrance(v))
-                            })
-                            .width(Length::Fill),
-                        )
-                        .push(
-                            text::body(format!("{}", self.nvidia_conf.vibrance))
-                                .apply(widget::container)
-                                .width(Length::Fixed(52.0)),
-                        ),
-                );
-
             col = col.push(
-                list_column()
-                    .add(settings::item::builder("RTX Smooth Motion")
-                        .description("NVPRESENT_ENABLE_SMOOTH_MOTION — frame interpolation (driver 575+)")
-                        .control(toggler(self.nvidia_conf.smooth_motion)
-                            .on_toggle(|v| msg(Message::NvSmoothMotion(v)))))
-                    .add(settings::item::builder("NVIDIA Reflex (Low Latency)")
-                        .description("PROTON_ENABLE_NVAPI + DXVK_ENABLE_NVAPI — requires Proton/DXVK game")
-                        .control(toggler(self.nvidia_conf.reflex)
-                            .on_toggle(|v| msg(Message::NvReflex(v)))))
-                    .add(settings::item::builder("DLDSR 2.25×")
-                        .description("Deep Learning DSR — renders at 1.5× linear resolution, downscales to native")
-                        .control(toggler(self.nvidia_conf.dldsr)
-                            .on_toggle(|v| msg(Message::NvDldsr(v)))))
-                    .add(vibrance_row)
-                    .add(settings::item::builder("Gamescope Output Resolution")
-                        .description("Virtual display resolution Gamescope presents to the game")
-                        .control(widget::dropdown(res_opts, res_sel, |i| {
-                            let (w, h, _) = GS_RESOLUTIONS[i.min(GS_RESOLUTIONS.len() - 1)];
-                            msg(Message::NvGsResolution(w, h))
-                        }).width(Length::Fixed(260.0))))
-                    .add(settings::item::builder("Upscaling Mode")
-                        .description("Upscaling algorithm used by Gamescope when rendering below native")
-                        .control(widget::dropdown(upscale_opts, upscale_sel, |i| msg(Message::NvUpscale(i)))
-                            .width(Length::Fixed(260.0))))
-                    .add(fps_row),
-            );
-
-            col = col.push(
-                widget::button::suggested("Save NVIDIA config").on_press(msg(Message::NvApply)),
+                text::caption(
+                    "Gamescope, upscaling and NVIDIA gaming features are in Displays → Gaming.",
+                )
+                .apply(widget::container)
+                .padding([sp.space_xxs, sp.space_xs]),
             );
         }
 
@@ -1464,32 +1214,24 @@ impl page::Page<crate::pages::Message> for Page {
 
     fn on_enter(&mut self) -> Task<crate::pages::Message> {
         cosmic::task::future(async move {
-            let (enabled, display, gpu, conf, nvidia_conf) = tokio::task::spawn_blocking(|| {
+            let (enabled, display, gpu, conf) = tokio::task::spawn_blocking(|| {
                 (
                     service_active(),
                     parse_edid_blocking(),
                     gpu_vendor(),
                     read_conf(),
-                    read_nvidia_conf(),
                 )
             })
             .await
             .unwrap_or_else(|e| {
                 tracing::error!("HDR on_enter task panicked: {e:?}");
-                (
-                    false,
-                    None,
-                    "unknown",
-                    HdrConf::default(),
-                    NvidiaConf::default(),
-                )
+                (false, None, "unknown", HdrConf::default())
             });
             crate::pages::Message::DisplayHdr(Message::Loaded {
                 enabled,
                 display,
                 gpu,
                 conf,
-                nvidia_conf,
             })
         })
     }
