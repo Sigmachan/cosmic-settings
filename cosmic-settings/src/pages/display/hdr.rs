@@ -25,6 +25,8 @@ pub struct HdrConf {
     pub oled_preset: bool,
     pub oled_dim_min: u32,
     pub force_oled: bool,
+    /// Automatic mode: the daemon enables HDR from EDID with no manual fiddling.
+    pub auto_mode: bool,
 }
 
 impl Default for HdrConf {
@@ -40,6 +42,7 @@ impl Default for HdrConf {
             oled_preset: false,
             oled_dim_min: 0,
             force_oled: false,
+            auto_mode: true,
         }
     }
 }
@@ -93,6 +96,9 @@ pub fn read_conf() -> HdrConf {
                     }
                     "FORCE_OLED" => {
                         c.force_oled = v.trim() == "1";
+                    }
+                    "AUTO" => {
+                        c.auto_mode = v.trim() != "0";
                     }
                     _ => {}
                 }
@@ -194,6 +200,29 @@ async fn do_reset() -> Result<(), String> {
     } else {
         Err(format!("kms-hdr reset exited {status}"))
     }
+}
+
+/// Persist Automatic/Manual mode, and when switching to Automatic engage HDR
+/// right away if the display is HDR-capable (the daemon would otherwise only
+/// re-evaluate on the next hotplug/login).
+async fn set_auto_mode(on: bool) -> Result<(), String> {
+    let flag = if on { "1" } else { "0" };
+    let s = tokio::process::Command::new("pkexec")
+        .args([BIN, "--set-auto", flag, "--save-only"])
+        .status()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !s.success() {
+        return Err(format!("kms-hdr --set-auto exited {s}"));
+    }
+    if on {
+        // Engage now if appropriate; --auto is a no-op on SDR displays.
+        let _ = tokio::process::Command::new("pkexec")
+            .args([BIN, "--auto"])
+            .status()
+            .await;
+    }
+    Ok(())
 }
 
 // ── GPU detection ─────────────────────────────────────────────────────────────
@@ -525,6 +554,7 @@ pub enum Message {
         conf: HdrConf,
     },
     OledDimScrub(u32),
+    AutoMode(bool),
     HdrToggle(bool),
     SdrNits(u32),
     PeakNits(u32),
@@ -606,6 +636,19 @@ impl Page {
                 let edid_oled = display.as_ref().map(|d| d.is_oled).unwrap_or(false);
                 self.display_is_oled = edid_oled || self.conf.force_oled;
                 self.display = display;
+            }
+
+            Message::AutoMode(on) => {
+                self.conf.auto_mode = on;
+                self.status = Some(if on {
+                    "Automatic — HDR managed from display…".into()
+                } else {
+                    "Manual control".into()
+                });
+                return cosmic::task::future(async move {
+                    let result = set_auto_mode(on).await;
+                    crate::app::Message::from(Message::Applied(result))
+                });
             }
 
             Message::HdrToggle(on) => {
@@ -828,6 +871,49 @@ impl Page {
                         ),
                 ),
             );
+        }
+
+        // ── Automatic / Manual ────────────────────────────────────────────────
+        col = col.push(
+            list_column().add(
+                settings::item::builder("Automatic")
+                    .description(
+                        "HDR turns itself on when an HDR display is connected, using the \
+                         display's own EDID. Turn off for manual control and calibration.",
+                    )
+                    .control(toggler(self.conf.auto_mode).on_toggle(|v| msg(Message::AutoMode(v)))),
+            ),
+        );
+
+        // In Automatic mode the daemon does everything — show a status line and
+        // stop here. All the knobs and the calibration wizard live under Manual.
+        if self.conf.auto_mode {
+            let hdr_capable = self
+                .display
+                .as_ref()
+                .map(|d| d.hdr10 || d.hlg || d.hdr10plus || d.dolby)
+                .unwrap_or(false);
+            let status = if self.hdr_enabled {
+                "HDR is on — configured automatically from your display."
+            } else if hdr_capable {
+                "HDR-capable display detected — it engages automatically."
+            } else {
+                "No HDR display detected. Connect one and HDR turns on by itself."
+            };
+            col = col
+                .push(
+                    text::body(status)
+                        .apply(widget::container)
+                        .padding([sp.space_xs, sp.space_s]),
+                )
+                .push(
+                    text::caption(
+                        "Want to fine-tune or calibrate? Turn off Automatic to reveal manual controls.",
+                    )
+                    .apply(widget::container)
+                    .padding([0, sp.space_s]),
+                );
+            return col.into();
         }
 
         // ── GPU badge ─────────────────────────────────────────────────────────
