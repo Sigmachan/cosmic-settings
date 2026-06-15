@@ -52,6 +52,8 @@ pub enum Message {
     #[cfg(feature = "page-display")]
     DisplayHdr(display::hdr::Message),
     #[cfg(feature = "page-display")]
+    DisplayGaming(display::gaming::Message),
+    #[cfg(feature = "page-display")]
     Displays(display::Message),
     #[cfg(feature = "wayland")]
     Dock(desktop::dock::Message),

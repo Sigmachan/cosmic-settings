@@ -480,6 +480,13 @@ impl cosmic::Application for SettingsApp {
                 }
 
                 #[cfg(feature = "page-display")]
+                crate::pages::Message::DisplayGaming(message) => {
+                    if let Some(page) = self.pages.page_mut::<display::gaming::Page>() {
+                        return page.update(message).map(Into::into);
+                    }
+                }
+
+                #[cfg(feature = "page-display")]
                 crate::pages::Message::Displays(message) => {
                     if let Some(page) = self.pages.page_mut::<display::Page>() {
                         return page.update(message).map(Into::into);

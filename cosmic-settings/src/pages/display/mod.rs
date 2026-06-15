@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 pub mod arrangement;
+pub mod gaming;
 pub mod hdr;
 // pub mod night_light;
 
@@ -158,6 +159,8 @@ pub struct Page {
     adjusted_scale: u32,
     /// Entity ID of the HDR sub-page for navigation.
     pub hdr_id: page::Entity,
+    /// Entity ID of the Gaming sub-page for navigation.
+    pub gaming_id: page::Entity,
 }
 
 impl Default for Page {
@@ -181,6 +184,7 @@ impl Default for Page {
             show_display_options: true,
             adjusted_scale: 0,
             hdr_id: page::Entity::default(),
+            gaming_id: page::Entity::default(),
         }
     }
 }
@@ -215,8 +219,10 @@ impl page::AutoBind<crate::pages::Message> for Page {
         mut page: page::Insert<crate::pages::Message>,
     ) -> page::Insert<crate::pages::Message> {
         let id = page.sub_page_with_id::<hdr::Page>();
+        let gaming_id = page.sub_page_with_id::<gaming::Page>();
         let model = page.model.page_mut::<Page>().unwrap();
         model.hdr_id = id;
+        model.gaming_id = gaming_id;
         page
     }
 }
@@ -243,6 +249,8 @@ impl page::Page<crate::pages::Message> for Page {
             sections.insert(display_configuration()),
             // HDR & Wide Colour navigation link
             sections.insert(hdr_navigation()),
+            // Gaming navigation link
+            sections.insert(gaming_navigation()),
         ])
     }
 
@@ -1490,6 +1498,21 @@ pub fn hdr_navigation() -> Section<crate::pages::Message> {
             .add(crate::widget::go_next_item(
                 "HDR & Wide Colour",
                 crate::pages::Message::Page(page.hdr_id),
+            ))
+            .into()
+    })
+}
+
+/// Navigation entry in the Display page that opens the Gaming sub-page.
+pub fn gaming_navigation() -> Section<crate::pages::Message> {
+    Section::default().view::<Page>(|_binder, page, _section| {
+        if page.gaming_id.is_null() {
+            return widget::settings::section().into();
+        }
+        widget::settings::section()
+            .add(crate::widget::go_next_item(
+                "Gaming",
+                crate::pages::Message::Page(page.gaming_id),
             ))
             .into()
     })
